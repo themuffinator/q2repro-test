@@ -868,9 +868,17 @@ static void draw_skeleton_mesh(const md5_model_t *model, const md5_mesh_t *mesh,
     else
         tess_plain_skel(mesh, skel);
 
+    image_t **skins = mesh->skins;
+    int num_skins = mesh->num_skins;
+
+    if (!skins || !num_skins) {
+        skins = model->skins;
+        num_skins = model->num_skins;
+    }
+
     draw_alias_mesh(mesh->indices, mesh->num_indices,
                     mesh->tcoords, mesh->num_verts,
-                    model->skins, model->num_skins);
+                    skins, num_skins);
 }
 
 static void draw_alias_skeleton(const md5_model_t *model)
