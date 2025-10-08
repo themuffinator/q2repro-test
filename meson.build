@@ -134,6 +134,7 @@ client_src = [
   'src/client/keys.c',
   'src/client/locs.c',
   'src/client/main.c',
+  'src/client/modelview.c',
   'src/client/newfx.c',
   'src/client/parse.c',
   'src/client/precache.c',

@@ -536,6 +536,10 @@ V_RenderView
 */
 void V_RenderView(void)
 {
+    if (CL_ModelView_Render()) {
+        return;
+    }
+
     // an invalid frame will just use the exact previous refdef
     // we can't use the old frame if the video mode has changed, though...
     if (cl.frame.valid) {

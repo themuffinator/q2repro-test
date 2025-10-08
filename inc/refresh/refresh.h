@@ -215,6 +215,7 @@ void    R_Shutdown(bool total);
 // slash will not use the "pics/" prefix or the ".pcx" postfix)
 void    R_BeginRegistration(const char *map);
 qhandle_t R_RegisterModel(const char *name);
+unsigned   R_ModelNumFrames(qhandle_t model);
 qhandle_t R_RegisterImage(const char *name, imagetype_t type,
                           imageflags_t flags);
 void    R_SetSky(const char *name, float rotate, bool autorotate, const vec3_t axis);

@@ -2725,6 +2725,7 @@ static void CL_InitLocal(void)
     CL_InitEffects();
     CL_InitTEnts();
     CL_InitDownloads();
+    CL_ModelView_Init();
     CL_Wheel_Init();
     CL_GTV_Init();
 

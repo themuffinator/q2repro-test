@@ -698,6 +698,10 @@ void Key_Event(unsigned key, bool down, unsigned time)
             anykeydown = 0;
     }
 
+    if (CL_ModelView_KeyEvent(key, down, keydown[key])) {
+        return;
+    }
+
     // hack for demo freelook in windowed mode
     if (cls.key_dest == KEY_GAME && cls.demo.playback && key == K_SHIFT && keydown[key] <= 1) {
         IN_Activate();
