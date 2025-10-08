@@ -18,11 +18,16 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 */
 
 #include "gl.h"
+#include <float.h>
+
 #include "format/md2.h"
 #if USE_MD3
 #include "format/md3.h"
 #endif
 #include "format/sp2.h"
+#if USE_MD5
+#include "format/iqm.h"
+#endif
 
 #define MOD_GpuMalloc(size) \
     Hunk_TryAlloc(gl_static.use_gpu_lerp ? &temp_hunk[0] : &model->hunk, size, gl_static.hunk_align)
@@ -1353,9 +1358,9 @@ static bool MD5_LoadFile(model_t *model, const char *path, bool (*parse)(model_t
     void *data;
     int ret = FS_LoadFile(path, &data);
     if (!data) {
-    MOD_PrintError(path, ret);
-    return false;
-}
+        MOD_PrintError(path, ret);
+        return false;
+    }
 
     ret = parse(model, data, path);
     FS_FreeFile(data);
@@ -1365,6 +1370,604 @@ static bool MD5_LoadFile(model_t *model, const char *path, bool (*parse)(model_t
     }
 
     return true;
+}
+
+static void AliasNormalFromVec(const vec3_t normal, uint8_t latlng[2])
+{
+    vec3_t n;
+    VectorCopy(normal, n);
+
+    float len = VectorLength(n);
+    if (len <= 0.0f) {
+        latlng[0] = latlng[1] = 0;
+        return;
+    }
+
+    VectorScale(n, 1.0f / len, n);
+
+    float z = n[2];
+    if (z > 1.0f)
+        z = 1.0f;
+    else if (z < -1.0f)
+        z = -1.0f;
+
+    const float scale = 255.0f / (2.0f * (float)M_PI);
+    int ilat = Q_rint(acosf(z) * scale);
+    if (ilat < 0)
+        ilat = 0;
+    else if (ilat > 255)
+        ilat = 255;
+
+    int ilng = Q_rint(atan2f(n[1], n[0]) * scale);
+    ilng %= 256;
+    if (ilng < 0)
+        ilng += 256;
+
+    latlng[0] = (uint8_t)ilat;
+    latlng[1] = (uint8_t)ilng;
+}
+
+static void CalcSkelVert(const md5_vertex_t *vert, const md5_mesh_t *mesh,
+                         const md5_joint_t *skeleton, vec3_t position, vec3_t normal)
+{
+    VectorClear(position);
+    if (normal)
+        VectorClear(normal);
+
+    for (int i = 0; i < vert->count; i++) {
+        const md5_weight_t *weight = &mesh->weights[vert->start + i];
+        const md5_joint_t *joint = &skeleton[mesh->jointnums[vert->start + i]];
+
+        vec3_t tmp;
+        VectorRotate(weight->pos, joint->axis, tmp);
+        VectorMA(joint->pos, joint->scale, tmp, tmp);
+        VectorMA(position, weight->bias, tmp, position);
+
+        if (normal) {
+            VectorRotate(vert->normal, joint->axis, tmp);
+            VectorMA(normal, weight->bias, tmp, normal);
+        }
+    }
+
+    if (normal) {
+        float len = VectorLength(normal);
+        if (len > 0.0f)
+            VectorScale(normal, 1.0f / len, normal);
+    }
+}
+
+static int MOD_LoadIQM(model_t *model, const void *rawdata, size_t length)
+{
+    int ret = Q_ERR_INVALID_FORMAT;
+    if (length < sizeof(iqmheader_t))
+        return Q_ERR_FILE_TOO_SMALL;
+
+    iqmheader_t header = *(const iqmheader_t *)rawdata;
+    if (memcmp(header.magic, IQM_MAGIC, sizeof(header.magic)))
+        return Q_ERR_UNKNOWN_FORMAT;
+
+    header.version           = LittleLong(header.version);
+    header.filesize          = LittleLong(header.filesize);
+    header.flags             = LittleLong(header.flags);
+    header.num_text          = LittleLong(header.num_text);
+    header.ofs_text          = LittleLong(header.ofs_text);
+    header.num_meshes        = LittleLong(header.num_meshes);
+    header.ofs_meshes        = LittleLong(header.ofs_meshes);
+    header.num_vertexarrays  = LittleLong(header.num_vertexarrays);
+    header.num_vertexes      = LittleLong(header.num_vertexes);
+    header.ofs_vertexarrays  = LittleLong(header.ofs_vertexarrays);
+    header.num_triangles     = LittleLong(header.num_triangles);
+    header.ofs_triangles     = LittleLong(header.ofs_triangles);
+    header.ofs_adjacency     = LittleLong(header.ofs_adjacency);
+    header.num_joints        = LittleLong(header.num_joints);
+    header.ofs_joints        = LittleLong(header.ofs_joints);
+    header.num_poses         = LittleLong(header.num_poses);
+    header.ofs_poses         = LittleLong(header.ofs_poses);
+    header.num_anims         = LittleLong(header.num_anims);
+    header.ofs_anims         = LittleLong(header.ofs_anims);
+    header.num_frames        = LittleLong(header.num_frames);
+    header.num_framechannels = LittleLong(header.num_framechannels);
+    header.ofs_frames        = LittleLong(header.ofs_frames);
+    header.num_bounds        = LittleLong(header.num_bounds);
+    header.ofs_bounds        = LittleLong(header.ofs_bounds);
+    header.num_comment       = LittleLong(header.num_comment);
+    header.ofs_comment       = LittleLong(header.ofs_comment);
+    header.num_extensions    = LittleLong(header.num_extensions);
+    header.ofs_extensions    = LittleLong(header.ofs_extensions);
+
+    if (header.version != IQM_VERSION) {
+        Com_SetLastError("Unsupported IQM version");
+        return Q_ERR_UNKNOWN_FORMAT;
+    }
+
+    if (header.filesize > length) {
+        Com_SetLastError("IQM file truncated");
+        return Q_ERR_INVALID_FORMAT;
+    }
+
+    if (header.num_meshes < 1 || header.num_vertexes < 1 || header.num_triangles < 1 ||
+        header.num_joints < 1 || header.num_frames < 1) {
+        Com_SetLastError("IQM has no geometry");
+        return Q_ERR_INVALID_FORMAT;
+    }
+
+    if (header.num_meshes > MD5_MAX_MESHES || header.num_joints > MD5_MAX_JOINTS ||
+        header.num_frames > MD5_MAX_FRAMES || header.num_vertexes > TESS_MAX_VERTICES ||
+        header.num_triangles > TESS_MAX_INDICES / 3) {
+        Com_SetLastError("IQM is too large");
+        return Q_ERR_INVALID_FORMAT;
+    }
+
+    if (header.num_poses != header.num_joints) {
+        Com_SetLastError("IQM pose count mismatch");
+        return Q_ERR_INVALID_FORMAT;
+    }
+
+    const byte *data = (const byte *)rawdata;
+
+    if ((uint64_t)header.ofs_meshes + header.num_meshes * sizeof(iqmmesh_t) > length ||
+        (uint64_t)header.ofs_vertexarrays + header.num_vertexarrays * sizeof(iqmvertexarray_t) > length ||
+        (uint64_t)header.ofs_triangles + header.num_triangles * sizeof(iqmtriangle_t) > length ||
+        (uint64_t)header.ofs_joints + header.num_joints * sizeof(iqmjoint_t) > length ||
+        (uint64_t)header.ofs_poses + header.num_poses * sizeof(iqmpose_t) > length ||
+        (uint64_t)header.ofs_frames + header.num_frames * header.num_framechannels * sizeof(float) > length ||
+        (uint64_t)header.ofs_text + header.num_text > length) {
+        Com_SetLastError("IQM offsets out of bounds");
+        return Q_ERR_INVALID_FORMAT;
+    }
+
+    const char *text = (const char *)(data + header.ofs_text);
+    const iqmmesh_t *src_meshes = (const iqmmesh_t *)(data + header.ofs_meshes);
+    const iqmtriangle_t *src_tris = (const iqmtriangle_t *)(data + header.ofs_triangles);
+    const iqmjoint_t *src_joints = (const iqmjoint_t *)(data + header.ofs_joints);
+    const iqmpose_t *src_poses = (const iqmpose_t *)(data + header.ofs_poses);
+    const iqmvertexarray_t *src_vas = (const iqmvertexarray_t *)(data + header.ofs_vertexarrays);
+    const float *src_frames = (const float *)(data + header.ofs_frames);
+
+    const float *positions = NULL;
+    const float *texcoords = NULL;
+    const uint8_t *blend_indexes = NULL;
+    const uint8_t *blend_weights = NULL;
+
+    for (uint32_t i = 0; i < header.num_vertexarrays; i++) {
+        iqmvertexarray_t va = src_vas[i];
+        va.type = LittleLong(va.type);
+        va.flags = LittleLong(va.flags);
+        va.format = LittleLong(va.format);
+        va.size = LittleLong(va.size);
+        va.offset = LittleLong(va.offset);
+
+        size_t elem_size;
+        switch (va.format) {
+        case IQM_FLOAT:
+            elem_size = sizeof(float);
+            break;
+        case IQM_UBYTE:
+            elem_size = sizeof(uint8_t);
+            break;
+        default:
+            continue;
+        }
+
+        size_t array_size = (size_t)header.num_vertexes * va.size * elem_size;
+        if ((uint64_t)va.offset + array_size > length)
+            return Q_ERR_INVALID_FORMAT;
+
+        const byte *ptr = data + va.offset;
+
+        switch (va.type) {
+        case IQM_POSITION:
+            if (va.format == IQM_FLOAT && va.size >= 3)
+                positions = (const float *)ptr;
+            break;
+        case IQM_TEXCOORD:
+            if (va.format == IQM_FLOAT && va.size >= 2)
+                texcoords = (const float *)ptr;
+            break;
+        case IQM_BLENDINDEXES:
+            if (va.format == IQM_UBYTE && va.size >= 4)
+                blend_indexes = (const uint8_t *)ptr;
+            break;
+        case IQM_BLENDWEIGHTS:
+            if (va.format == IQM_UBYTE && va.size >= 4)
+                blend_weights = (const uint8_t *)ptr;
+            break;
+        default:
+            break;
+        }
+    }
+
+    if (!positions || !texcoords || !blend_indexes || !blend_weights) {
+        Com_SetLastError("IQM missing required vertex data");
+        return Q_ERR_INVALID_FORMAT;
+    }
+
+    MOD_HunkBegin(model);
+
+    size_t hunk_mark = model->hunk.cursize;
+    size_t temp_mark0 = temp_hunk[0].cursize;
+    size_t temp_mark1 = temp_hunk[1].cursize;
+
+    model->type = MOD_ALIAS;
+    model->nummeshes = header.num_meshes;
+    model->numframes = header.num_frames;
+
+    model->meshes = MOD_CpuMalloc(sizeof(model->meshes[0]) * model->nummeshes);
+    model->frames = MOD_CpuMalloc(sizeof(model->frames[0]) * model->numframes);
+    if (!model->meshes || !model->frames) {
+        ret = Q_ERR(ENOMEM);
+        goto fail_nomem;
+    }
+
+    memset(model->frames, 0, sizeof(model->frames[0]) * model->numframes);
+
+    md5_model_t *mdl = model->skeleton = MD5_CpuMalloc(sizeof(*mdl));
+    if (!mdl) {
+        ret = Q_ERR(ENOMEM);
+        goto fail_nomem;
+    }
+
+    mdl->num_meshes = header.num_meshes;
+    mdl->num_joints = header.num_joints;
+    mdl->num_frames = header.num_frames;
+    mdl->num_skins = 0;
+    mdl->skins = NULL;
+
+    mdl->meshes = MD5_CpuMalloc(sizeof(mdl->meshes[0]) * mdl->num_meshes);
+    mdl->skeleton_frames = MD5_CpuMalloc(sizeof(mdl->skeleton_frames[0]) * mdl->num_joints * mdl->num_frames);
+    if (!mdl->meshes || !mdl->skeleton_frames) {
+        ret = Q_ERR(ENOMEM);
+        goto fail_nomem;
+    }
+
+    for (int i = 0; i < mdl->num_joints * mdl->num_frames; i++)
+        mdl->skeleton_frames[i].scale = 1.0f;
+
+    baseframe_joint_t baseframe[MD5_MAX_JOINTS];
+
+    for (uint32_t i = 0; i < header.num_joints; i++) {
+        iqmjoint_t joint = src_joints[i];
+        joint.parent = LittleLong(joint.parent);
+
+        vec3_t local_pos;
+        quat_t local_orient;
+        for (int j = 0; j < 3; j++)
+            local_pos[j] = LittleFloat(joint.translate[j]);
+        for (int j = 0; j < 4; j++)
+            local_orient[j] = LittleFloat(joint.rotate[j]);
+
+        Quat_Normalize(local_orient);
+
+        baseframe_joint_t *out = &baseframe[i];
+
+        if (joint.parent >= 0) {
+            if ((uint32_t)joint.parent >= i) {
+                Com_SetLastError("IQM joints out of order");
+                goto fail_invalid;
+            }
+
+            const baseframe_joint_t *parent = &baseframe[joint.parent];
+            vec3_t rotated;
+            Quat_RotatePoint(parent->orient, local_pos, rotated);
+            VectorAdd(parent->pos, rotated, out->pos);
+
+            quat_t tmp;
+            Quat_MultiplyQuat(parent->orient, local_orient, tmp);
+            Quat_Normalize(tmp);
+            Vector4Copy(tmp, out->orient);
+        } else {
+            VectorCopy(local_pos, out->pos);
+            Vector4Copy(local_orient, out->orient);
+        }
+    }
+
+    for (uint32_t frame = 0; frame < header.num_frames; frame++) {
+        const float *frame_data = src_frames + frame * header.num_framechannels;
+        int channel_index = 0;
+
+        for (uint32_t i = 0; i < header.num_joints; i++) {
+            iqmpose_t pose = src_poses[i];
+            pose.parent = LittleLong(pose.parent);
+            uint32_t mask = LittleLong(pose.mask);
+
+            float values[10];
+            for (int j = 0; j < 10; j++) {
+                values[j] = LittleFloat(pose.channeloffset[j]);
+                if (mask & BIT(j)) {
+                    if (channel_index >= (int)header.num_framechannels) {
+                        Com_SetLastError("IQM frame data overflow");
+                        goto fail_invalid;
+                    }
+                    float v = LittleFloat(frame_data[channel_index++]);
+                    values[j] += v * LittleFloat(pose.channelscale[j]);
+                }
+            }
+
+            vec3_t trans = { values[0], values[1], values[2] };
+            quat_t rot = { values[3], values[4], values[5], values[6] };
+            Quat_Normalize(rot);
+
+            md5_joint_t *joint = &mdl->skeleton_frames[frame * mdl->num_joints + i];
+
+            if (pose.parent >= 0) {
+                if ((uint32_t)pose.parent >= i) {
+                    Com_SetLastError("IQM pose hierarchy invalid");
+                    goto fail_invalid;
+                }
+                const md5_joint_t *parent = &mdl->skeleton_frames[frame * mdl->num_joints + pose.parent];
+                vec3_t rotated;
+                Quat_RotatePoint(parent->orient, trans, rotated);
+                VectorAdd(parent->pos, rotated, joint->pos);
+
+                quat_t tmp;
+                Quat_MultiplyQuat(parent->orient, rot, tmp);
+                Quat_Normalize(tmp);
+                Vector4Copy(tmp, joint->orient);
+            } else {
+                VectorCopy(trans, joint->pos);
+                Vector4Copy(rot, joint->orient);
+            }
+
+            Quat_ToAxis(joint->orient, joint->axis);
+            joint->scale = 1.0f;
+        }
+
+        if (channel_index != (int)header.num_framechannels) {
+            Com_SetLastError("IQM frame data underrun");
+            goto fail_invalid;
+        }
+    }
+
+    for (uint32_t i = 0; i < header.num_meshes; i++) {
+        iqmmesh_t mesh_hdr = src_meshes[i];
+        mesh_hdr.name = LittleLong(mesh_hdr.name);
+        mesh_hdr.material = LittleLong(mesh_hdr.material);
+        mesh_hdr.first_vertex = LittleLong(mesh_hdr.first_vertex);
+        mesh_hdr.num_vertexes = LittleLong(mesh_hdr.num_vertexes);
+        mesh_hdr.first_triangle = LittleLong(mesh_hdr.first_triangle);
+        mesh_hdr.num_triangles = LittleLong(mesh_hdr.num_triangles);
+
+        if ((uint64_t)mesh_hdr.first_vertex + mesh_hdr.num_vertexes > header.num_vertexes ||
+            (uint64_t)mesh_hdr.first_triangle + mesh_hdr.num_triangles > header.num_triangles) {
+            Com_SetLastError("IQM mesh indices out of range");
+            goto fail_invalid;
+        }
+
+        md5_mesh_t *dst_mesh = &mdl->meshes[i];
+        dst_mesh->num_verts = mesh_hdr.num_vertexes;
+        dst_mesh->num_indices = mesh_hdr.num_triangles * 3;
+
+        dst_mesh->vertices = MD5_GpuMalloc(sizeof(dst_mesh->vertices[0]) * dst_mesh->num_verts);
+        dst_mesh->tcoords  = MD5_GpuMalloc(sizeof(dst_mesh->tcoords[0]) * dst_mesh->num_verts);
+        dst_mesh->indices  = MD5_GpuMallocIndices(sizeof(dst_mesh->indices[0]) * dst_mesh->num_indices);
+        if (!dst_mesh->vertices || !dst_mesh->tcoords || !dst_mesh->indices) {
+            ret = Q_ERR(ENOMEM);
+            goto fail_nomem;
+        }
+
+        int total_weights = 0;
+        for (uint32_t v = 0; v < mesh_hdr.num_vertexes; v++) {
+            uint32_t idx = mesh_hdr.first_vertex + v;
+            const uint8_t *bw = &blend_weights[idx * 4];
+            int count = 0;
+            for (int j = 0; j < 4; j++)
+                if (bw[j])
+                    count++;
+            total_weights += count ? count : 1;
+        }
+
+        dst_mesh->num_weights = total_weights;
+        dst_mesh->weights = MD5_GpuMalloc(sizeof(dst_mesh->weights[0]) * dst_mesh->num_weights);
+        dst_mesh->jointnums = MD5_GpuMalloc(sizeof(dst_mesh->jointnums[0]) * dst_mesh->num_weights);
+        if (!dst_mesh->weights || !dst_mesh->jointnums) {
+            ret = Q_ERR(ENOMEM);
+            goto fail_nomem;
+        }
+
+        int weight_cursor = 0;
+        for (uint32_t v = 0; v < mesh_hdr.num_vertexes; v++) {
+            uint32_t idx = mesh_hdr.first_vertex + v;
+            const float *pos_ptr = &positions[idx * 3];
+            vec3_t pos = {
+                LittleFloat(pos_ptr[0]),
+                LittleFloat(pos_ptr[1]),
+                LittleFloat(pos_ptr[2])
+            };
+
+            md5_vertex_t *vert = &dst_mesh->vertices[v];
+            vert->start = weight_cursor;
+            vert->count = 0;
+
+            const uint8_t *idxs = &blend_indexes[idx * 4];
+            const uint8_t *bw = &blend_weights[idx * 4];
+            float weight_sum = 0.0f;
+
+            for (int j = 0; j < 4; j++) {
+                if (!bw[j])
+                    continue;
+
+                uint8_t joint = idxs[j];
+                if (joint >= mdl->num_joints) {
+                    Com_SetLastError("IQM weight joint out of range");
+                    goto fail_invalid;
+                }
+
+                md5_weight_t *weight = &dst_mesh->weights[weight_cursor];
+                float bias = bw[j] / 255.0f;
+                weight_sum += bias;
+                weight->bias = bias;
+
+                vec3_t local;
+                VectorCopy(pos, local);
+                const baseframe_joint_t *joint_base = &baseframe[joint];
+                VectorSubtract(local, joint_base->pos, local);
+                quat_t orient_inv;
+                Quat_Conjugate(joint_base->orient, orient_inv);
+                Quat_RotatePoint(orient_inv, local, weight->pos);
+
+                dst_mesh->jointnums[weight_cursor] = joint;
+                weight_cursor++;
+                vert->count++;
+            }
+
+            if (!vert->count) {
+                md5_weight_t *weight = &dst_mesh->weights[weight_cursor];
+                dst_mesh->jointnums[weight_cursor] = 0;
+                VectorClear(weight->pos);
+                weight->bias = 1.0f;
+                vert->count = 1;
+                weight_cursor++;
+            } else if (weight_sum > 0.0f && fabsf(weight_sum - 1.0f) > 0.001f) {
+                for (int j = 0; j < vert->count; j++)
+                    dst_mesh->weights[vert->start + j].bias /= weight_sum;
+            }
+
+            maliastc_t *tc = &dst_mesh->tcoords[v];
+            const float *st = &texcoords[idx * 2];
+            tc->st[0] = LittleFloat(st[0]);
+            tc->st[1] = LittleFloat(st[1]);
+        }
+
+        uint16_t *dst_idx = dst_mesh->indices;
+        for (uint32_t t = 0; t < mesh_hdr.num_triangles; t++) {
+            const iqmtriangle_t *tri = &src_tris[mesh_hdr.first_triangle + t];
+            for (int j = 0; j < 3; j++) {
+                uint32_t idx = LittleLong(tri->vertex[j]);
+                if (idx < mesh_hdr.first_vertex || idx >= mesh_hdr.first_vertex + mesh_hdr.num_vertexes) {
+                    Com_SetLastError("IQM triangle index out of range");
+                    goto fail_invalid;
+                }
+                idx -= mesh_hdr.first_vertex;
+                dst_idx[j] = (uint16_t)idx;
+            }
+            dst_idx += 3;
+        }
+
+        MD5_ComputeNormals(dst_mesh, baseframe);
+
+        maliasmesh_t *alias_mesh = &model->meshes[i];
+        alias_mesh->numverts = dst_mesh->num_verts;
+        alias_mesh->numindices = dst_mesh->num_indices;
+        alias_mesh->numtris = mesh_hdr.num_triangles;
+
+        const char *material = (mesh_hdr.material < header.num_text) ? text + mesh_hdr.material : "";
+        bool has_material = material && *material;
+        alias_mesh->numskins = has_material ? 1 : 0;
+
+        if (!MOD_AllocMesh(model, alias_mesh)) {
+            ret = Q_ERR(ENOMEM);
+            goto fail_nomem;
+        }
+
+        if (has_material) {
+            Q_strlcpy(alias_mesh->skinnames[0], material, sizeof(alias_mesh->skinnames[0]));
+            alias_mesh->skins[0] = IMG_Find(material, IT_SKIN, IF_NONE);
+        }
+
+        memcpy(alias_mesh->tcoords, dst_mesh->tcoords, sizeof(maliastc_t) * alias_mesh->numverts);
+        memcpy(alias_mesh->indices, dst_mesh->indices, sizeof(uint16_t) * alias_mesh->numindices);
+    }
+
+    if (model->nummeshes && model->meshes[0].numskins) {
+        mdl->num_skins = model->meshes[0].numskins;
+        mdl->skins = MD5_CpuMalloc(sizeof(mdl->skins[0]) * mdl->num_skins);
+        if (!mdl->skins) {
+            ret = Q_ERR(ENOMEM);
+            goto fail_nomem;
+        }
+        for (int i = 0; i < mdl->num_skins; i++)
+            mdl->skins[i] = model->meshes[0].skins[i];
+    }
+
+    for (uint32_t frame_index = 0; frame_index < header.num_frames; frame_index++) {
+        maliasframe_t *frame = &model->frames[frame_index];
+        const md5_joint_t *skel = &mdl->skeleton_frames[frame_index * mdl->num_joints];
+
+        vec3_t mins = { FLT_MAX, FLT_MAX, FLT_MAX };
+        vec3_t maxs = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
+
+        for (uint32_t mesh_index = 0; mesh_index < header.num_meshes; mesh_index++) {
+            const md5_mesh_t *dst_mesh = &mdl->meshes[mesh_index];
+            for (int v = 0; v < dst_mesh->num_verts; v++) {
+                vec3_t pos;
+                CalcSkelVert(&dst_mesh->vertices[v], dst_mesh, skel, pos, NULL);
+                for (int k = 0; k < 3; k++) {
+                    mins[k] = min(mins[k], pos[k]);
+                    maxs[k] = max(maxs[k], pos[k]);
+                }
+            }
+        }
+
+        for (int k = 0; k < 3; k++) {
+            if (mins[k] > maxs[k])
+                mins[k] = maxs[k] = 0.0f;
+            float range = maxs[k] - mins[k];
+            if (range < 1e-4f) {
+                frame->scale[k] = 1.0f;
+                frame->translate[k] = mins[k];
+            } else {
+                frame->translate[k] = 0.5f * (maxs[k] + mins[k]);
+                frame->scale[k] = range / 65534.0f;
+            }
+        }
+
+        vec3_t bounds_min = { FLT_MAX, FLT_MAX, FLT_MAX };
+        vec3_t bounds_max = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
+
+        for (uint32_t mesh_index = 0; mesh_index < header.num_meshes; mesh_index++) {
+            const md5_mesh_t *dst_mesh = &mdl->meshes[mesh_index];
+            maliasmesh_t *alias_mesh = &model->meshes[mesh_index];
+            maliasvert_t *dst_vert = &alias_mesh->verts[frame_index * alias_mesh->numverts];
+
+            for (int v = 0; v < dst_mesh->num_verts; v++, dst_vert++) {
+                vec3_t pos, normal;
+                CalcSkelVert(&dst_mesh->vertices[v], dst_mesh, skel, pos, normal);
+
+                for (int k = 0; k < 3; k++) {
+                    int val = 0;
+                    if (frame->scale[k] != 0.0f)
+                        val = Q_rint((pos[k] - frame->translate[k]) / frame->scale[k]);
+                    if (val < SHRT_MIN)
+                        val = SHRT_MIN;
+                    else if (val > SHRT_MAX)
+                        val = SHRT_MAX;
+                    dst_vert->pos[k] = (int16_t)val;
+                    bounds_min[k] = min(bounds_min[k], val * frame->scale[k] + frame->translate[k]);
+                    bounds_max[k] = max(bounds_max[k], val * frame->scale[k] + frame->translate[k]);
+                }
+
+                uint8_t latlng[2];
+                AliasNormalFromVec(normal, latlng);
+                dst_vert->norm[0] = latlng[0];
+                dst_vert->norm[1] = latlng[1];
+            }
+        }
+
+        for (int k = 0; k < 3; k++) {
+            frame->bounds[0][k] = bounds_min[k];
+            frame->bounds[1][k] = bounds_max[k];
+        }
+        frame->radius = RadiusFromBounds(frame->bounds[0], frame->bounds[1]);
+    }
+
+    return Q_ERR_SUCCESS;
+
+fail_nomem:
+    Com_SetLastError("Out of memory");
+    goto fail;
+fail_invalid:
+    ret = Q_ERR_INVALID_FORMAT;
+fail:
+    if (gl_static.use_gpu_lerp) {
+        Hunk_FreeToWatermark(&temp_hunk[0], temp_mark0);
+        Hunk_FreeToWatermark(&temp_hunk[1], temp_mark1);
+        if (model->skeleton)
+            MD5_Free(model->skeleton);
+    } else {
+        Hunk_FreeToWatermark(&model->hunk, hunk_mark);
+    }
+    model->skeleton = NULL;
+    return ret;
 }
 
 static bool MD5_LoadSkins(model_t *model)
@@ -1595,21 +2198,32 @@ qhandle_t R_RegisterModel(const char *name)
     }
 
     // check ident
-    switch (LittleLong(*(uint32_t *)rawdata)) {
-    case MD2_IDENT:
-        load = MOD_LoadMD2;
-        break;
-#if USE_MD3
-    case MD3_IDENT:
-        load = MOD_LoadMD3;
-        break;
+    bool recognized = false;
+#if USE_MD5
+    if (ret >= (int)sizeof(iqmheader_t) &&
+        !memcmp(rawdata, IQM_MAGIC, sizeof(((iqmheader_t *)0)->magic))) {
+        load = MOD_LoadIQM;
+        recognized = true;
+    }
 #endif
-    case SP2_IDENT:
-        load = MOD_LoadSP2;
-        break;
-    default:
-        ret = Q_ERR_UNKNOWN_FORMAT;
-        goto fail2;
+
+    if (!recognized) {
+        switch (LittleLong(*(uint32_t *)rawdata)) {
+        case MD2_IDENT:
+            load = MOD_LoadMD2;
+            break;
+#if USE_MD3
+        case MD3_IDENT:
+            load = MOD_LoadMD3;
+            break;
+#endif
+        case SP2_IDENT:
+            load = MOD_LoadSP2;
+            break;
+        default:
+            ret = Q_ERR_UNKNOWN_FORMAT;
+            goto fail2;
+        }
     }
 
     model = MOD_Alloc();
@@ -1633,7 +2247,7 @@ qhandle_t R_RegisterModel(const char *name)
 #if USE_MD5
     // check for an MD5; this requires the MD2/MD3
     // to have loaded first, since we need it for skin names
-    if (model->type == MOD_ALIAS && gl_md5_load->integer)
+    if (model->type == MOD_ALIAS && gl_md5_load->integer && !model->skeleton)
         MOD_LoadMD5(model);
 #endif
 
