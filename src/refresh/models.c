@@ -1797,7 +1797,8 @@ static int MOD_LoadIQM(model_t *model, const void *rawdata, size_t length)
                 weight_sum += bias;
                 weight->bias = bias;
 
-                vec3_t local = pos;
+                vec3_t local;
+                VectorCopy(pos, local);
                 const baseframe_joint_t *joint_base = &baseframe[joint];
                 VectorSubtract(local, joint_base->pos, local);
                 quat_t orient_inv;
