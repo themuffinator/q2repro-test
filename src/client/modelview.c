@@ -292,6 +292,7 @@ bool CL_ModelView_Frame(int msec, float forward, float side, float vertical)
 
     modelview_update_animation(dt);
 
+    Com_Memset(&cl.cmd, 0, sizeof(cl.cmd));
     cl.cmd.msec = 0;
     cl.cmd.buttons = 0;
     cl.cmd.forwardmove = 0;
