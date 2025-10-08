@@ -434,6 +434,8 @@ typedef struct {
     uint16_t *indices;
     md5_weight_t *weights;
     uint8_t *jointnums;
+    int num_skins;
+    image_t **skins;
 } md5_mesh_t;
 
 /* MD5 model + animation structure */

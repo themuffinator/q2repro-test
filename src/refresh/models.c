@@ -996,6 +996,7 @@ static bool MD5_ParseMesh(model_t *model, const char *s, const char *path)
     MD5_ParseExpect(&s, "}");
 
     mdl->meshes = MD5_CpuMalloc(mdl->num_meshes * sizeof(mdl->meshes[0]));
+    memset(mdl->meshes, 0, mdl->num_meshes * sizeof(mdl->meshes[0]));
     for (i = 0; i < mdl->num_meshes; i++) {
         md5_mesh_t *mesh = &mdl->meshes[i];
 
@@ -1620,6 +1621,8 @@ static int MOD_LoadIQM(model_t *model, const void *rawdata, size_t length)
         goto fail_nomem;
     }
 
+    memset(mdl->meshes, 0, sizeof(mdl->meshes[0]) * mdl->num_meshes);
+
     for (int i = 0; i < mdl->num_joints * mdl->num_frames; i++)
         mdl->skeleton_frames[i].scale = 1.0f;
 
@@ -1865,6 +1868,17 @@ static int MOD_LoadIQM(model_t *model, const void *rawdata, size_t length)
 
         memcpy(alias_mesh->tcoords, dst_mesh->tcoords, sizeof(maliastc_t) * alias_mesh->numverts);
         memcpy(alias_mesh->indices, dst_mesh->indices, sizeof(uint16_t) * alias_mesh->numindices);
+
+        dst_mesh->num_skins = alias_mesh->numskins;
+        if (dst_mesh->num_skins) {
+            dst_mesh->skins = MD5_CpuMalloc(sizeof(dst_mesh->skins[0]) * dst_mesh->num_skins);
+            if (!dst_mesh->skins) {
+                ret = Q_ERR(ENOMEM);
+                goto fail_nomem;
+            }
+            for (int s = 0; s < dst_mesh->num_skins; s++)
+                dst_mesh->skins[s] = alias_mesh->skins[s];
+        }
     }
 
     if (model->nummeshes && model->meshes[0].numskins) {
@@ -2001,6 +2015,23 @@ static bool MD5_LoadSkins(model_t *model)
         }
     }
 
+    for (int mesh_index = 0; mesh_index < mdl->num_meshes; mesh_index++) {
+        md5_mesh_t *mesh = &mdl->meshes[mesh_index];
+
+        mesh->num_skins = mdl->num_skins;
+        if (!mesh->num_skins)
+            continue;
+
+        mesh->skins = MD5_CpuMalloc(sizeof(mesh->skins[0]) * mesh->num_skins);
+        if (!mesh->skins) {
+            Com_EPrintf("Out of memory for MD5 mesh skins\n");
+            return false;
+        }
+
+        for (int j = 0; j < mesh->num_skins; j++)
+            mesh->skins[j] = mdl->skins[j];
+    }
+
     return true;
 }
 
@@ -2008,6 +2039,9 @@ static void MD5_Free(md5_model_t *mdl)
 {
     if (!mdl || !gl_static.use_gpu_lerp)
         return;
+    if (mdl->meshes)
+        for (int i = 0; i < mdl->num_meshes; i++)
+            Z_Free(mdl->meshes[i].skins);
     Z_Free(mdl->meshes);
     Z_Free(mdl->skeleton_frames);
     Z_Free(mdl->skins);
