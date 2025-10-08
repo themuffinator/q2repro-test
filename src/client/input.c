@@ -650,15 +650,31 @@ void CL_UpdateCmd(int msec)
 {
     Vector2Clear(cl.localmove);
 
-    if (sv_paused->integer) {
-        return;
-    }
-
     // add to milliseconds of time to apply the move
     cl.cmd.msec += msec;
 
+    vec3_t prev_angles;
+    VectorCopy(cl.viewangles, prev_angles);
+
     // adjust viewangles
     CL_AdjustAngles(msec);
+
+    // allow mice to add to the move
+    CL_MouseMove();
+
+    float forward = CL_KeyState(&in_forward) - CL_KeyState(&in_back);
+    float side = CL_KeyState(&in_moveright) - CL_KeyState(&in_moveleft);
+    float vertical = CL_KeyState(&in_up) - CL_KeyState(&in_down);
+
+    if (CL_ModelView_Frame(msec, forward, side, vertical)) {
+        return;
+    }
+
+    if (sv_paused->integer) {
+        VectorCopy(prev_angles, cl.viewangles);
+        cl.cmd.msec = 0;
+        return;
+    }
 
     // get basic movement from keyboard, including jump/crouch
     CL_BaseMove(cl.localmove);
@@ -666,9 +682,6 @@ void CL_UpdateCmd(int msec)
         cl.cmd.buttons |= BUTTON_JUMP;
     if (in_down.state & 3)
         cl.cmd.buttons |= BUTTON_CROUCH;
-
-    // allow mice to add to the move
-    CL_MouseMove();
 
     // add accumulated mouse forward/side movement
     cl.localmove[0] += cl.mousemove[0];
@@ -809,6 +822,10 @@ void CL_FinalizeCmd(void)
     }
 
     if (sv_paused->integer) {
+        goto clear;
+    }
+
+    if (CL_ModelView_Active()) {
         goto clear;
     }
 

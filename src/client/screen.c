@@ -1995,6 +1995,12 @@ static void SCR_Draw2D(void)
     if (cls.key_dest & KEY_MENU)
         return;
 
+    if (CL_ModelView_Active()) {
+        R_SetScale(1.0f);
+        CL_ModelView_Draw2D();
+        return;
+    }
+
     R_SetScale(scr.hud_scale);
 
     scr.hud_height = Q_rint(scr.hud_height * scr.hud_scale);

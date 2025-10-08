@@ -395,6 +395,26 @@ typedef struct {
     } weapon;
 
     struct {
+        bool        active;
+        bool        restore_viewangles;
+        vec3_t      saved_viewangles;
+        vec3_t      angles;
+        vec3_t      target;
+        float       distance;
+        qhandle_t   model;
+        qhandle_t   skin;
+        int         model_modified;
+        int         skin_modified;
+        unsigned    num_frames;
+        unsigned    current_frame;
+        unsigned    next_frame;
+        float       frame_lerp;
+        float       frame_interval;
+        bool        animation_paused;
+        int         animation_dir;
+    } modelview;
+
+    struct {
         cl_fog_params_t     start, end;
         int                 lerp_time, lerp_time_start;
     } fog;
@@ -918,6 +938,13 @@ void V_AddLight(const vec3_t org, float intensity, float r, float g, float b);
 void V_AddLightStyle(int style, float value);
 void CL_UpdateBlendSetting(void);
 void V_FogParamsChanged(unsigned bits, unsigned color_bits, unsigned hf_start_color_bits, unsigned hf_end_color_bits, const cl_fog_params_t *params, int time);
+
+void CL_ModelView_Init(void);
+bool CL_ModelView_Active(void);
+bool CL_ModelView_Frame(int msec, float forward, float side, float vertical);
+bool CL_ModelView_Render(void);
+bool CL_ModelView_KeyEvent(unsigned key, bool down, unsigned repeats);
+void CL_ModelView_Draw2D(void);
 
 // wheel.c
 void CL_Wheel_WeapNext(void);
