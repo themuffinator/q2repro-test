@@ -1505,14 +1505,27 @@ static int MOD_LoadIQM(model_t *model, const void *rawdata, size_t length)
     }
 
     const byte *data = (const byte *)rawdata;
+    const uint64_t total_length = length;
 
-    if ((uint64_t)header.ofs_meshes + header.num_meshes * sizeof(iqmmesh_t) > length ||
-        (uint64_t)header.ofs_vertexarrays + header.num_vertexarrays * sizeof(iqmvertexarray_t) > length ||
-        (uint64_t)header.ofs_triangles + header.num_triangles * sizeof(iqmtriangle_t) > length ||
-        (uint64_t)header.ofs_joints + header.num_joints * sizeof(iqmjoint_t) > length ||
-        (uint64_t)header.ofs_poses + header.num_poses * sizeof(iqmpose_t) > length ||
-        (uint64_t)header.ofs_frames + header.num_frames * header.num_framechannels * sizeof(float) > length ||
-        (uint64_t)header.ofs_text + header.num_text > length) {
+    uint64_t frame_elems = (uint64_t)header.num_frames * header.num_framechannels;
+    if (header.num_framechannels && frame_elems / header.num_framechannels != header.num_frames) {
+        Com_SetLastError("IQM frame data overflow");
+        return Q_ERR_INVALID_FORMAT;
+    }
+
+    if (frame_elems > total_length / sizeof(float)) {
+        Com_SetLastError("IQM offsets out of bounds");
+        return Q_ERR_INVALID_FORMAT;
+    }
+    uint64_t frame_bytes = frame_elems * sizeof(float);
+
+    if ((uint64_t)header.ofs_meshes + (uint64_t)header.num_meshes * sizeof(iqmmesh_t) > total_length ||
+        (uint64_t)header.ofs_vertexarrays + (uint64_t)header.num_vertexarrays * sizeof(iqmvertexarray_t) > total_length ||
+        (uint64_t)header.ofs_triangles + (uint64_t)header.num_triangles * sizeof(iqmtriangle_t) > total_length ||
+        (uint64_t)header.ofs_joints + (uint64_t)header.num_joints * sizeof(iqmjoint_t) > total_length ||
+        (uint64_t)header.ofs_poses + (uint64_t)header.num_poses * sizeof(iqmpose_t) > total_length ||
+        (uint64_t)header.ofs_text + header.num_text > total_length ||
+        (uint64_t)header.ofs_frames > total_length - frame_bytes) {
         Com_SetLastError("IQM offsets out of bounds");
         return Q_ERR_INVALID_FORMAT;
     }
@@ -1550,8 +1563,15 @@ static int MOD_LoadIQM(model_t *model, const void *rawdata, size_t length)
             continue;
         }
 
-        size_t array_size = (size_t)header.num_vertexes * va.size * elem_size;
-        if ((uint64_t)va.offset + array_size > length)
+        uint64_t array_elems = (uint64_t)header.num_vertexes * va.size;
+        if (va.size && array_elems / va.size != header.num_vertexes)
+            return Q_ERR_INVALID_FORMAT;
+
+        if (array_elems > total_length / elem_size)
+            return Q_ERR_INVALID_FORMAT;
+
+        uint64_t array_size = array_elems * elem_size;
+        if ((uint64_t)va.offset > total_length - array_size)
             return Q_ERR_INVALID_FORMAT;
 
         const byte *ptr = data + va.offset;

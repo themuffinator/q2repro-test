@@ -21,7 +21,7 @@ Supported features include (from Q2PRO):
 * syncing to GPU for reduced input lag with vsync on
 * ZIP packfiles (.pkz)
 * JPEG/PNG textures and screenshots
-* MD3 and MD5 (re-release) models
+* MD3, MD5 (re-release), and IQM models
 * Ogg Vorbis music and Ogg Theora cinematics
 * compatibility with re-release assets
 * fast and secure HTTP downloads
