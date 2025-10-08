@@ -2348,6 +2348,34 @@ model_t *MOD_ForHandle(qhandle_t h)
     return model;
 }
 
+unsigned R_ModelNumFrames(qhandle_t h)
+{
+    const model_t *model = MOD_ForHandle(h);
+
+    if (!model) {
+        return 0;
+    }
+
+#if USE_MD5
+    if (model->skeleton && model->skeleton->num_frames > 0) {
+        return model->skeleton->num_frames;
+    }
+#endif
+
+    switch (model->type) {
+    case MOD_ALIAS:
+    case MOD_SPRITE:
+        if (model->numframes > 0) {
+            return model->numframes;
+        }
+        break;
+    default:
+        break;
+    }
+
+    return model->numframes > 0 ? model->numframes : 1;
+}
+
 void MOD_Init(void)
 {
     Q_assert(!r_numModels);
